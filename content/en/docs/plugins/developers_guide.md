@@ -5,7 +5,7 @@ weight: 1
 
 # Introduction
 
-This page is a guide for developers who want to write their own Falco/Falco libs plugins. It provides full details on the plugins API, walks through the source code of two example plugins to show how the API is used, and presents some best practices on the best way to use the API.
+This page is a guide for developers who want to write their own Falco/Falco libs plugins. It provides full details on the plugins API, walks through the source code of two example plugins to show how the API is used, and presents some best practices on how to use the API.
 
 If you're not interested in writing your own plugin, or modifying one of the existing plugins, you can skip this page.
 
@@ -37,13 +37,13 @@ The plugins API is versioned with a [semver](https://semver.org/)-style version 
 
 Some API functions are required, while others are optional. If a function is optional, the plugin can choose to not define the function at all. The framework will note that the function is not defined and use a default behavior. For optional functions, the default behavior is described below.
 
-## Every string/struct must be allocated
+## Every String or Struct Must Be Allocated
 
-Every API function that returns or populates a string or struct pointer must point to allocated memory, allocated with `malloc()`. The plugin framework will free the allocated memory with calls to `free()`.
+Every API function that returns or populates a string or struct pointer must point to memory allocated by the plugin (typically `malloc()`). The plugin framework will free the allocated memory with calls to `plugin_free_mem()`. In the typical case where memory was allocated via `malloc()`, the implementation of `plugin_free_mem(void *ptr)` should just call `free(ptr)`.
 
-For plugins written in Go, the [plugin-sdk-go](https://github.com/falcosecurity/plugin-sdk-go) module provides utility functions that handle the conversion between Go types (e.g. `string`) and C types (e.g. `char *`).
+For plugins written in Go, the [plugin-sdk-go](https://github.com/falcosecurity/plugin-sdk-go) module provides utility functions that handle the conversion between Go types (e.g. `string`) and C types (e.g. `char *`), as well as a package `plugin-sdk-go/free` that defines a version of `plugin_free_mem()` that calls `free()`.
 
-## Cgo pitfalls with packages
+## Cgo Pitfalls with Packages
 
 Cgo has a [limitation](https://github.com/golang/go/issues/13467) where generated go types for C types (e.g. `C.ss_plugin_event`) are package-specific and not exported. This means that if you include `plugin_info.h` in your plugin in one package, the go types corresponding to structs/enums/etc in `plugin_info.h` can not be used directly in other packages.
 
@@ -105,13 +105,13 @@ The C header file [plugin_info.h](https://github.com/falcosecurity/libs/blob/new
 
 Remember, however, that from the perspective of the plugin, each function name has a prefix `plugin_` e.g. `plugin_get_required_api_version()`, `plugin_get_type()`, etc.
 
-## Conventions for all functions
+## Conventions For All Functions
 
 The following conventions apply for all of the below API functions:
 
 * Every function that returns or populates a `char *` must return a null-terminated C string.
-* Every function that returns or populates a `char *` or a struct pointer must allocate the memory for the string/struct using `malloc()`. The plugin framework will free the allocated memory using `free()`.
-* For every function that returns an error, if the function returns an error, the plugin framework will assume that no strings/structs were allocated and will not call `free()` on any values.
+* Every function that returns or populates a `char *` or a struct pointer must allocate the memory for the string/struct (typically `malloc()`). The plugin framework will free the allocated memory using `plugin_free_mem()`.
+* For every function that returns an error, if the function returns an error, the plugin framework will assume that no strings/structs were allocated and will not call `plugin_free_mem()` on any values.
 
 ## Source Plugin API Functions
 
@@ -197,7 +197,7 @@ When defining fields, keep the following guidelines in mind:
 
 #### `ss_plugin_t* plugin_init(char *config, int32_t* rc) [Required: yes]`
 
-This function passes plugin-level configuration to the plugin to create its plugin-level state. The plugin then returns a pointer to that state, as a `ss_plugin_t *` handle. The handle is never examined by the plugin framework and is never free()d. It is only provided as the argument to later API functions.
+This function passes plugin-level configuration to the plugin to create its plugin-level state. The plugin then returns a pointer to that state, as a `ss_plugin_t *` handle. The handle is never examined by the plugin framework and is never freed. It is only provided as the argument to later API functions.
 
 When managing plugin-level state, keep the following in mind:
 
@@ -228,6 +228,16 @@ The same general guidelines apply for `plugin_open` as do for `plugin_init`:
 
 This function closes a stream of events previously started via a call to `plugin_open`. Afterwards, the stream should be considered closed and the framework will not call `plugin_next`/`plugin_extract_fields` with the same `ss_instance_t` pointer.
 
+### Misc Functions
+
+#### `void plugin_get_last_error(ss_plugin_t* s)`
+
+This function is called by the framework after a prior call returned an error. The plugin should return a meaningful error string providing more information about the most recent error.
+
+#### `void plugin_free_mem(void *ptr)`
+
+This function is called by the framework to free any allocated memory (string, structs, event payloads) passed from the plugin to the framework.
+
 ### Events/Fields Related Functions
 
 #### `int32_t plugin_next(ss_plugin_t* s, ss_instance_t* h, ss_plugin_event **evt) [Required: yes]`
@@ -249,11 +259,11 @@ typedef struct ss_plugin_event
 The struct has the following members:
 
 * `evtnum`: incremented for each event returned. Might not be contiguous.
-* `data`: pointer to a memory buffer pointer allocated by the plugin. The plugin will set it to point to the memory containing the next event. Once returned, the memory is owned by the plugin framework and will be freed via a call to free().
+* `data`: pointer to a memory buffer pointer allocated by the plugin. The plugin will set it to point to the memory containing the next event. Once returned, the memory is owned by the plugin framework and will be freed via a call to `plugin_free_mem()`.
 * `datalen`: pointer to a 32bit integer. The plugin will set it the size of the buffer pointed by data.
 * `ts`: the event timestamp, in nanoseconds since the epoch. Can be (uint64_t)-1, in which case the engine will automatically fill the event time with the current time.
 
-Remember that *both* the event data in `data` as well as the surrounding struct in `evt` must be allocated by the plugin and will be free()d by the plugin framework.
+Remember that *both* the event data in `data` as well as the surrounding struct in `evt` must be allocated by the plugin and will be freed by the plugin framework.
 
 It is not necessary to fill in the evtnum struct member when returning events via plugin_next/plugin_next_batch. Event numbers are allocated by the plugin framework.
 
@@ -327,21 +337,11 @@ typedef struct ss_plugin_extract_field
 } ss_plugin_extract_field;
 ```
 
-For each struct, the plugin fills in `field`/`arg`/`ftype` with the field. The plugin should fill in `field_present` and either `res_str`/`res_u64` with the value for the field, depending on the field type `ftype`. If the field type is `FTYPE_STRING`, res_str should be updated to point to an allocated string with the string value. The plugin framework will `free()` the string value afterwards.
+For each struct, the plugin fills in `field`/`arg`/`ftype` with the field. The plugin should fill in `field_present` and either `res_str`/`res_u64` with the value for the field, depending on the field type `ftype`. If the field type is `FTYPE_STRING`, res_str should be updated to point to an allocated string with the string value. The plugin framework will free the string value afterwards via a call to `plugin_free_mem()`.
 
-If `field_present` is set to false, the plugin framework assumes that `res_str`/`res_u64` is undefined and will not use or free() it.
+If `field_present` is set to false, the plugin framework assumes that `res_str`/`res_u64` is undefined and will not use or free it.
 
 Similar to `next_batch()`, the [plugin-sdk-go](https://github.com/falcosecurity/plugin-sdk-go) module provides a utility function `sinsp.WrapExtractFuncs` that can wrap simpler functions that extract individual values and handle the type conversion/iteration over fields. That package is described in more detail below.
-
-#### `int32_t (*register_async_extractor)(ss_plugin_t *s, async_extractor_info *info) [Required: no]`
-
-This optional, advanced function is used to amortize the overhead of Cgo function calls across multiple calls to `extract_fields()`. Implementing it properly requires close coordination with the plugin framework to coordinate synchronous updates to the provided struct as well as notifications to/from the plugin framework.
-
-There shouldn't be any need to implement this function directly in plugins. For plugins written in C, the overhead is low and amortization is not required. For plugins written in Go, the [plugin-sdk-go](https://github.com/falcosecurity/plugin-sdk-go) module provides a utility function `sinsp.RegisterAsyncExtractors` that can wrap simpler functions that extract individual values and handle the interactions with the plugin framework.
-
-If not defined, the plugin framework will use the simpler `plugin_get_fields()` function instead.
-
-The function is only described here to note that it's for advanced use and does not need to be implemented directly.
 
 ## Extractor Plugin API Functions
 
@@ -352,6 +352,7 @@ With the exception of `plugin_get_extract_event_sources`, almost all functions u
 * `plugin_init`
 * `plugin_destroy`
 * `plugin_get_last_error`
+* `plugin_free_mem`
 * `plugin_get_name`
 * `plugin_get_description`
 * `plugin_get_contact`
@@ -399,6 +400,7 @@ import (
 	"github.com/falcosecurity/plugin-sdk-go"
 	"github.com/falcosecurity/plugin-sdk-go/state"
 	"github.com/falcosecurity/plugin-sdk-go/wrappers"
+	"github.com/falcosecurity/plugin-sdk-go/free"	
 )
 ```
 
@@ -407,6 +409,8 @@ Including `plugin_info.h` allows for direct use of generated Go types for C stru
 `plugin_info.h` is not included with the dummy plugin, but you can retrieve it from [here](https://github.com/falcosecurity/libs/blob/master/userspace/libscap/plugin_info.h). The exact value for CFLAGS will depend on the location of `plugin_info.h` relative to dummy.go. In the plugins repository, `plugin_info.h` is two directories above `dummy.go`, hence the `../../`.
 
 The go module `falcosecurity/plugin-sdk-go` has its own [documentation](https://pkg.go.dev/falcosecurity/plugin-sdk-go) as well.
+
+Note that because `plugin-sdk-go/wrappers` was imported, `plugin-sdk-go/free` was also imported, to define a `plugin_free_mem()` function that frees memory allocated in the wrapper functions.
 
 ### Info Functions
 
@@ -555,6 +559,11 @@ func plugin_init(config *C.char, rc *int32) unsafe.Pointer {
 	handle := state.NewStateContainer()
 	state.SetContext(handle, unsafe.Pointer(ps))
 
+	// This "wraps" the go-specific simple extraction functions,
+	// taking care of the details of type conversion between go
+	// types and C types.
+	wrappers.RegisterExtractors(extract_str, extract_u64)
+
 	*rc = sdk.SSPluginSuccess
 
 	return handle
@@ -682,6 +691,9 @@ func Next(pState unsafe.Pointer, iState unsafe.Pointer) (*sdk.PluginEvent, int32
 	// It is not mandatory to set the Timestamp of the event (it
 	// would be filled in by the framework if set to uint_max),
 	// but it's a good practice.
+	//
+	// Also note that the Evtnum is not set, as event numbers are
+	// assigned by the plugin framework.
 	evt := &sdk.PluginEvent{
 		Data:      []byte(str),
 		Timestamp: uint64(time.Now().Unix()) * 1000000000,
@@ -744,7 +756,7 @@ func plugin_event_to_string(pState unsafe.Pointer, data *C.uint8_t, datalen uint
 
 Similar to Next(), the implementation of field extraction is performed by higher-level go functions `extract_str`/`extract_u64` that work on a single field and are type-specific based on the field value (string vs uint64).
 
-`plugin_extract_fields` wraps these functions using `wrappers.WrapExtractFuncs()`, which handles the details of iterating over the fields and converting go types to C types.
+These higher-level go functions are passed to the `plugin-sdk-go/wrappers` module by calling `wrappers.RegisterExtractors()` in `plugin_init`. Importing `plugin-sdk-go/wrappers` defines a `plugin_extract_fields` function that in turn calls these higher-level go functions and additionally takes care of the conversion between Go types and C types as well as iterating over the list of fields.
 
 ```go
 // This plugin only needs to implement simpler single-field versions
@@ -794,35 +806,6 @@ func extract_u64(pState unsafe.Pointer, evtnum uint64, data []byte, ts uint64, f
 		ps.lastError = fmt.Errorf("No known field %s", field)
 		return false, 0
 	}
-}
-
-// This wraps the simple extract functions above and is the actual exported function
-
-//export plugin_extract_fields
-func plugin_extract_fields(pState unsafe.Pointer, evt *C.struct_ss_plugin_event, numFields uint32, fields *C.struct_ss_plugin_extract_field) int32 {
-	log.Printf("[%s] plugin_extract_fields\n", PluginName)
-	return wrappers.WrapExtractFuncs(pState, unsafe.Pointer(evt), numFields, unsafe.Pointer(fields), extract_str, extract_u64)
-}
-```
-
-#### (Optional) Asynchronous Field Extraction
-
-If a plugin is expected to generate a high volume of events (e.g. > 1000/second), it may be useful to amortize the cost of calling Go functions from C by using the asynchronous field extraction interface. This involves a single function call from C with synchronization/coordination around a shared C struct, combined with spin waits/signaling between the plugin framework and the plugin. Using asynchronous field extraction has costs in terms of performing the spin waits/signaling, so only use it if these costs are lower than the overhead of calling go functions from the plugin framework.
-
-From the plugin perspective, this simply involves using the higher-level `extract_str`/`extract_u64` functions again with a wrapper function `wrappers.RegisterAsyncExtractors()`:
-
-```go
-// This wraps the simple extract functions above to allow for multiple
-// field extractions in a single function call. Although provided here
-// for example purposes, there is a CPU cost of async extraction and
-// it should only be defined if a plugin has a very high rate of
-// events (> thousands/second) and where the CPU cost of async
-// extraction is worth avoiding the overhead of C-to-Go function calls
-// for individual calls to plugin_extract_fields
-
-//export plugin_register_async_extractor
-func plugin_register_async_extractor(pluginState unsafe.Pointer, asyncExtractorInfo unsafe.Pointer) int32 {
-	return wrappers.RegisterAsyncExtractors(pluginState, asyncExtractorInfo, extract_str, extract_u64)
 }
 ```
 
@@ -1014,6 +997,18 @@ char* plugin_get_last_error(ss_plugin_t* s)
 	}
 
 	return NULL;
+}
+```
+
+### Freeing Memory
+
+The dummy plugin allocates strings/structs passed to the framework using `malloc()`. In turn, the framework calls `plugin_free_mem()` to free any allocated memory:
+
+```c++
+extern "C"
+void plugin_free_mem(void *ptr)
+{
+    free(ptr);
 }
 ```
 
@@ -1255,9 +1250,9 @@ int32_t plugin_extract_fields(ss_plugin_t *s, const ss_plugin_event *evt, uint32
 }
 ```
 
-### Not Included: Batched Events and Asynchronous Extraction
+### Not Included: Batched Events
 
-Note that unlike the Go plugin, this plugin does not implement `plugin_next_batch` or `plugin_register_async_extractor`. This is allowed--the plugin framework will simply use `plugin_next` to fetch individual events. Also, because the overhead of calling C functions from C much lower than calling Go functions from C, the framework can use `plugin_extract_fields` to extract fields from events.
+Note that unlike the Go plugin, this plugin does not implement `plugin_next_batch`. This is allowed--the plugin framework will simply use `plugin_next` to fetch individual events.
 
 ### Plugin In Action
 
